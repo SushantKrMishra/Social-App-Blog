@@ -12,6 +12,8 @@ const {
   getAllUsers,
   forgetPassword,
   resetPassword,
+  getMyPosts,
+  getUserPosts,
 } = require("../controllers/user");
 const { isAuthenticated } = require("../middlewares/auth");
 const router = express.Router();
@@ -27,4 +29,6 @@ router.route("/user/:id").get(isAuthenticated, getUserProfile);
 router.route("/users").get(isAuthenticated, getAllUsers);
 router.route("/forgot/password").post(forgetPassword);
 router.route("/password/reset/:token").put(resetPassword);
+router.route("/my/posts").get(isAuthenticated, getMyPosts);
+router.route("/userposts/:id").get(isAuthenticated, getUserPosts);
 module.exports = router;

@@ -2,20 +2,24 @@ const User = require("../models/User");
 const Post = require("../models/Post");
 const { sendEmail } = require("../middlewares/sendEmail");
 const crypto = require("crypto");
+const cloudinary = require("cloudinary");
 exports.register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, avatar } = req.body;
     let user = await User.findOne({ email });
     if (user) {
       return res
         .status(400)
         .json({ success: false, message: "User Already Exsists" });
     }
+    const myCloud = await cloudinary.v2.uploader.upload(avatar, {
+      folder: "avatars",
+    });
     user = await User.create({
       name,
       email,
       password,
-      avatar: { public_id: "sample_id", url: "sample_url" },
+      avatar: { public_id: myCloud.public_id, url: myCloud.secure_url },
     });
     const token = await user.generateToken();
     const options = {
@@ -38,7 +42,9 @@ exports.register = async (req, res) => {
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email }).select("+password");
+    const user = await User.findOne({ email })
+      .select("+password")
+      .populate("followers following");
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -157,14 +163,21 @@ exports.updatePassword = async (req, res) => {
 exports.updateProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    const { name, email } = req.body;
+    const { name, email, avatar } = req.body;
     if (name) {
       user.name = name;
     }
     if (email) {
       user.email = email;
     }
-    //UserAvatar
+    if (avatar) {
+      await cloudinary.v2.uploader.destroy(user.avatar.public_id);
+      const myCloud = await cloudinary.v2.uploader.upload(avatar, {
+        folder: "avatars",
+      });
+      user.avatar.public_id = myCloud.public_id;
+      user.avatar.url = myCloud.secure_url;
+    }
     await user.save();
     res.status(200).json({
       success: true,
@@ -177,10 +190,11 @@ exports.updateProfile = async (req, res) => {
     });
   }
 };
+
 exports.deleteMyProfile = async (req, res) => {
   try {
     const user = await User.findOne({ _id: req.user._id })
-      .populate("following")
+      .populate("following posts")
       .exec();
 
     if (!user) {
@@ -194,7 +208,21 @@ exports.deleteMyProfile = async (req, res) => {
     const followers = user.followers;
     const userId = user._id;
     const following = user.following;
+    // Delete user's avatar from Cloudinary
+    if (user.avatar && user.avatar.public_id) {
+      await cloudinary.v2.uploader.destroy(user.avatar.public_id);
+    }
 
+    // Delete all posts of the user from Cloudinary
+    await Promise.all(
+      posts.map(async (post) => {
+        if (post.image) {
+          await cloudinary.v2.uploader.destroy(post?.image?.public_id);
+        }
+      })
+    );
+
+    // Delete user document
     await User.deleteOne({ _id: req.user._id });
 
     // Logout user after deleting profile
@@ -203,29 +231,54 @@ exports.deleteMyProfile = async (req, res) => {
       httpOnly: true,
     });
 
-    // Delete all posts of the user
+    // Delete all posts of the user from the database
     await Post.deleteMany({ _id: { $in: posts } });
 
     // Remove user from followers' following list
-    for (let i = 0; i < followers.length; i++) {
-      const follower = await User.findById(followers[i]);
-      if (follower) {
-        const index = follower.following.indexOf(userId);
-        if (index > -1) {
-          follower.following.splice(index, 1);
-          await follower.save();
+    await Promise.all(
+      followers.map(async (followerId) => {
+        const follower = await User.findById(followerId);
+        if (follower) {
+          const index = follower.following.indexOf(userId);
+          if (index > -1) {
+            follower.following.splice(index, 1);
+            await follower.save();
+          }
+        }
+      })
+    );
+
+    // Remove user from following's followers list
+    await Promise.all(
+      following.map(async (followingId) => {
+        const follows = await User.findById(followingId);
+        if (follows) {
+          const index = follows.followers.indexOf(userId);
+          if (index > -1) {
+            follows.followers.splice(index, 1);
+            await follows.save();
+          }
+        }
+      })
+    );
+    //Remove user all comments
+    const allPosts = await Post.find();
+    for (let i = 0; i < allPosts.length; i++) {
+      const post = await Post.findById(allPosts[i]._id);
+      for (let j = 0; j < post.comments.length; j++) {
+        if (post.comments[j].user === userId) {
+          post.comments.splice(j, 1);
+          await post.save();
         }
       }
     }
-
-    // Remove user from following's followers list
-    for (let i = 0; i < following.length; i++) {
-      const follows = await User.findById(following[i]);
-      if (follows) {
-        const index = follows.followers.indexOf(userId);
-        if (index > -1) {
-          follows.followers.splice(index, 1);
-          await follows.save();
+    //Remove user all likes
+    for (let i = 0; i < allPosts.length; i++) {
+      const post = await Post.findById(allPosts[i]._id);
+      for (let j = 0; j < post.likes.length; j++) {
+        if (post.likes[j] === userId) {
+          post.likes.splice(j, 1);
+          await post.save();
         }
       }
     }
@@ -241,10 +294,11 @@ exports.deleteMyProfile = async (req, res) => {
     });
   }
 };
-
 exports.myProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).populate("posts");
+    const user = await User.findById(req.user._id).populate(
+      "posts followers following"
+    );
     res.status(200).json({
       success: true,
       user,
@@ -258,7 +312,9 @@ exports.myProfile = async (req, res) => {
 };
 exports.getUserProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).populate("posts");
+    const user = await User.findById(req.params.id).populate(
+      "posts followers following"
+    );
     if (!user) {
       res.status(404).json({
         success: false,
@@ -278,7 +334,9 @@ exports.getUserProfile = async (req, res) => {
 };
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.find({});
+    const users = await User.find({
+      name: { $regex: req.query.name, $options: "i" },
+    });
     res.status(200).json({
       success: true,
       users,
@@ -303,7 +361,7 @@ exports.forgetPassword = async (req, res) => {
     await user.save();
     const resetUrl = `${req.protocol}://${req.get(
       "host"
-    )}/api/v1/password/reset/${resetPasswordToken}`;
+    )}/password/reset/${resetPasswordToken}`;
     const message = `Reset your password by clicking on the link below :\n\n ${resetUrl}`;
     try {
       await sendEmail({
@@ -333,7 +391,10 @@ exports.forgetPassword = async (req, res) => {
 };
 exports.resetPassword = async (req, res) => {
   try {
-    const resetPasswordToken = crypto.createHash("sha256").update(req.params.token).digest("hex");
+    const resetPasswordToken = crypto
+      .createHash("sha256")
+      .update(req.params.token)
+      .digest("hex");
     const user = await User.findOne({
       resetPasswordToken,
       resetPasswordExpire: { $gt: Date.now() },
@@ -363,3 +424,45 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
+exports.getMyPosts = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    const posts = [];
+    for (let i = 0; i < user.posts.length; i++) {
+      const post = await Post.findById(user.posts[i]).populate(
+        "likes comments.user owner"
+      );
+      posts.push(post);
+    }
+    res.status(200).json({
+      success: true,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+exports.getUserPosts = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const posts = [];
+    for (let i = 0; i < user.posts.length; i++) {
+      const post = await Post.findById(user.posts[i]).populate(
+        "likes comments.user owner"
+      );
+      posts.push(post);
+    }
+    res.status(200).json({
+      success: true,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};

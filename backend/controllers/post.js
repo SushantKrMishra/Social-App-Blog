@@ -1,22 +1,26 @@
 const Post = require("../models/Post");
 const User = require("../models/User");
+const cloudinary = require("cloudinary");
 exports.createPost = async (req, res) => {
   try {
+    const myCloud = await cloudinary.v2.uploader.upload(req.body.image, {
+      folder: "posts",
+    });
     const newPostData = {
       caption: req.body.caption,
       image: {
-        public_id: "req.body.public_id",
-        url: "req.body.url",
+        public_id: myCloud.public_id,
+        url: myCloud.secure_url,
       },
       owner: req.user._id,
     };
     const post = await Post.create(newPostData);
     const user = await User.findById(req.user._id);
-    user.posts.push(post._id);
+    user.posts.unshift(post._id);
     await user.save();
     res.status(201).json({
       success: true,
-      post: post,
+      message:"Post Created",
     });
   } catch (error) {
     res.status(500).json({
@@ -77,7 +81,7 @@ exports.deletePost = async (req, res) => {
         message: "Unauthorized",
       });
     }
-
+    await cloudinary.v2.uploader.destroy(post.image.public_id)
     const index = user.posts.indexOf(req.params.id);
     user.posts.splice(index, 1);
 
@@ -102,11 +106,11 @@ exports.getPostOfFollowing = async (req, res) => {
       owner: {
         $in: user.following,
       },
-    });
+    }).populate("owner likes comments.user");
     res.status(200).json({
       success: true,
 
-      posts,
+      posts: posts.reverse(),
     });
   } catch (error) {
     res.status(500).json({
@@ -194,11 +198,11 @@ exports.deleteComment = async (req, res) => {
       });
     }
     if (post.owner.toString() === req.user._id.toString()) {
-      if(req.body.commentId==undefined){
+      if (req.body.commentId == undefined) {
         return res.status(400).json({
-          success:false,
-          message:"Comment Id is required"
-        })
+          success: false,
+          message: "Comment Id is required",
+        });
       }
       post.comments.forEach((item, index) => {
         if (item.user.toString() === req.body.commentId.toString()) {
@@ -207,9 +211,9 @@ exports.deleteComment = async (req, res) => {
       });
       await post.save();
       return res.status(200).json({
-        success:true,
-        message:"Selected Comment Deleted"
-      })
+        success: true,
+        message: "Selected Comment Deleted",
+      });
     } else {
       post.comments.forEach((item, index) => {
         if (item.user.toString() === req.user._id.toString()) {
